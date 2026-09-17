@@ -1,14 +1,20 @@
 """
 بوت إشارات تليجرام - استراتيجيات مختلفة لكل أصل
 ====================================================
-- الذهب (XAUUSD)   → PDH/PDL Liquidity Sweep
-- اليورو (EURUSD)  → PDH/PDL Liquidity Sweep
-- البيتكوين (BTC)  → EMA 9/21 Crossover + RSI Filter
+- الذهب (XAUUSD)، اليورو (EURUSD) → Box Theory (صندوق اليوم اللي فات)
+- البيتكوين (BTC)، الباوند (GBPUSD)، الين (USDJPY) → EMA 9/21 Crossover + RSI Filter
 
-كل أصل بياخد الاستراتيجية اللي بتناسب طبيعته: الذهب واليورو أسواق
-جلسات (session-based) بترتد حوالين مستويات اليوم اللي فات، والبيتكوين
-سوق 24 ساعة ميّال للاتجاهات (trending) فمناسب له متابعة اتجاه بدل
-الارتداد حوالين مستوى ثابت.
+استراتيجية Box Theory:
+- بناخد أعلى وأقل سعر لشمعة اليوم اللي فات (Daily) = "الصندوق"
+- خط النص = منتصف المسافة بين القمة والقاع
+- على فريم 15 دقيقة: لو السعر قريب من أعلى الصندوق (آخر 15% من الارتفاع) →
+  Sell فقط. لو قريب من أسفل الصندوق (أول 15%) → Buy فقط. لو في المنتصف →
+  لا تداول (منطقة غير واضحة)
+- الدخول مش فوري: البوت بيستنى شمعة تأكيد/انعكاس قبل ما يبعت الإشارة،
+  عشان يقلل الإشارات الكاذبة
+
+دالة استراتيجية الـ PDH/PDL Sweep القديمة لسه موجودة في الكود
+(check_sweep_signal) لو حبيت ترجعلها في أي وقت.
 
 البوت ده بيبعت إشعار على تليجرام بس، ومش بينفذ أي صفقة فعلية.
 دايماً راجع الإشارة بنفسك قبل ما تدخل صفقة.
@@ -39,18 +45,23 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
 
 ASSETS = {
-    "GOLD": {"symbol": "GC=F", "label": "الذهب (XAUUSD)", "interval": "15m", "strategy": "sweep"},
-    "EURUSD": {"symbol": "EURUSD=X", "label": "اليورو/دولار (EURUSD)", "interval": "15m", "strategy": "sweep"},
+    "GOLD": {"symbol": "GC=F", "label": "الذهب (XAUUSD)", "interval": "15m", "strategy": "box_theory"},
+    "EURUSD": {"symbol": "EURUSD=X", "label": "اليورو/دولار (EURUSD)", "interval": "15m", "strategy": "box_theory"},
     "BTC": {"symbol": "BTC-USD", "label": "البيتكوين (BTCUSD)", "interval": "15m", "strategy": "ema_rsi"},
+    "GBPUSD": {"symbol": "GBPUSD=X", "label": "الباوند/دولار (GBPUSD)", "interval": "15m", "strategy": "ema_rsi"},
+    "USDJPY": {"symbol": "USDJPY=X", "label": "دولار/ين (USDJPY)", "interval": "15m", "strategy": "ema_rsi"},
 }
 
 CHECK_EVERY_SECONDS = 60 * 5
 
-# إعدادات استراتيجية EMA+RSI (للبيتكوين)
+# إعدادات استراتيجية EMA+RSI (البيتكوين، الباوند، الين)
 EMA_FAST = 9
 EMA_SLOW = 21
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70
+
+# إعدادات استراتيجية Box Theory (الذهب، اليورو)
+BOX_ZONE_PERCENT = 0.15  # أقرب 15% من كل طرف تعتبر "قريب"
 # =====================================
 
 
@@ -72,9 +83,27 @@ def make_ema_rsi_state():
     return {"last_signal": None}
 
 
+def make_box_state():
+    return {
+        "current_day": None,
+        "box_high": None,
+        "box_low": None,
+        "box_mid": None,
+        "zone": None,          # "top", "bottom", "middle"
+        "awaiting_confirm": None,  # "SELL" أو "BUY" لو مستني شمعة تأكيد
+        "last_signal_sent": None,
+    }
+
+
+STATE_FACTORIES = {
+    "sweep": make_sweep_state,
+    "ema_rsi": make_ema_rsi_state,
+    "box_theory": make_box_state,
+}
+
 state = {}
 for name, cfg in ASSETS.items():
-    state[name] = make_sweep_state() if cfg["strategy"] == "sweep" else make_ema_rsi_state()
+    state[name] = STATE_FACTORIES[cfg["strategy"]]()
 
 
 def send_telegram_message(text):
@@ -201,7 +230,7 @@ def check_sweep_signal(asset_name):
             print(f"[{label} | {datetime.now()}] في صفقة {direction}، مستني الهدف {target:.4f}. السعر الحالي: {price:.4f}")
 
 
-# ============ استراتيجية 2: EMA Crossover + RSI (البيتكوين) ============
+# ============ استراتيجية 2: EMA Crossover + RSI (البيتكوين، الباوند، الين) ============
 
 def check_ema_rsi_signal(asset_name):
     cfg = ASSETS[asset_name]
@@ -237,17 +266,114 @@ def check_ema_rsi_signal(asset_name):
         take_profit = price * 1.04 if signal == "BUY" else price * 0.96
         message = (
             f"🔔 <b>إشارة {signal} - {label}</b>\n"
-            f"السعر الحالي: {price:.2f}\n"
+            f"السعر الحالي: {price:.4f}\n"
             f"RSI: {rsi:.1f}\n"
-            f"وقف الخسارة المقترح: {stop_loss:.2f}\n"
-            f"جني الأرباح المقترح: {take_profit:.2f}\n\n"
+            f"وقف الخسارة المقترح: {stop_loss:.4f}\n"
+            f"جني الأرباح المقترح: {take_profit:.4f}\n\n"
             f"⚠️ ده إشعار فقط - راجع السوق بنفسك قبل الدخول"
         )
         send_telegram_message(message)
         print(message)
         s["last_signal"] = signal
     else:
-        print(f"[{label} | {datetime.now()}] لا توجد إشارة جديدة. السعر: {price:.2f} | RSI: {rsi:.1f}")
+        print(f"[{label} | {datetime.now()}] لا توجد إشارة جديدة. السعر: {price:.4f} | RSI: {rsi:.1f}")
+
+
+# ============ استراتيجية 3: Box Theory (الذهب، اليورو) ============
+
+def reset_box_state(asset_name, today):
+    cfg = ASSETS[asset_name]
+    box_high, box_low, _ = get_daily_levels(cfg["symbol"])
+    s = state[asset_name]
+    s.update(make_box_state())
+    s["current_day"] = today
+    s["box_high"] = box_high
+    s["box_low"] = box_low
+    if box_high is not None:
+        s["box_mid"] = (box_high + box_low) / 2
+        print(f"[{cfg['label']} | {today}] Box High={box_high:.4f} Low={box_low:.4f} Mid={s['box_mid']:.4f}")
+
+
+def get_box_zone(price, box_high, box_low):
+    box_range = box_high - box_low
+    if box_range <= 0:
+        return "middle"
+    top_threshold = box_high - box_range * BOX_ZONE_PERCENT
+    bottom_threshold = box_low + box_range * BOX_ZONE_PERCENT
+    if price >= top_threshold:
+        return "top"
+    elif price <= bottom_threshold:
+        return "bottom"
+    else:
+        return "middle"
+
+
+def check_box_theory_signal(asset_name):
+    cfg = ASSETS[asset_name]
+    symbol, label, interval = cfg["symbol"], cfg["label"], cfg["interval"]
+    s = state[asset_name]
+    today = datetime.now(timezone.utc).date()
+
+    if s["current_day"] != today or s["box_high"] is None:
+        reset_box_state(asset_name, today)
+
+    if s["box_high"] is None:
+        print(f"[{label}] مش قادر أحدد الصندوق دلوقتي، هحاول تاني بعد شوية.")
+        return
+
+    df = get_intraday_candles(symbol, interval)
+    if len(df) < 2:
+        return
+
+    prev = df.iloc[-2]
+    curr = df.iloc[-1]
+    price = float(curr["close"])
+    box_high, box_low, box_mid = s["box_high"], s["box_low"], s["box_mid"]
+    zone = get_box_zone(price, box_high, box_low)
+
+    # لو السعر رجع للمنتصف، نلغي أي تأكيد كنا مستنيينه
+    if zone == "middle":
+        if s["awaiting_confirm"]:
+            print(f"[{label}] السعر رجع لمنطقة النص، إلغاء انتظار التأكيد.")
+        s["awaiting_confirm"] = None
+        print(f"[{label} | {datetime.now()}] السعر في منطقة غير واضحة (النص). السعر: {price:.4f}")
+        return
+
+    expected_direction = "SELL" if zone == "top" else "BUY"
+
+    # شمعة تأكيد/انعكاس: شمعة بتقفل عكس اتجاه الحركة اللي وصلت بيها للمنطقة
+    is_bearish_reversal = float(curr["close"]) < float(curr["open"]) and float(prev["close"]) > float(prev["open"])
+    is_bullish_reversal = float(curr["close"]) > float(curr["open"]) and float(prev["close"]) < float(prev["open"])
+
+    confirmed = (expected_direction == "SELL" and is_bearish_reversal) or \
+                (expected_direction == "BUY" and is_bullish_reversal)
+
+    if not confirmed:
+        s["awaiting_confirm"] = expected_direction
+        print(
+            f"[{label} | {datetime.now()}] السعر قريب من {'القمة' if zone == 'top' else 'القاع'}، "
+            f"مستني شمعة تأكيد {expected_direction}. السعر: {price:.4f}"
+        )
+        return
+
+    sig_key = f"{today}-{expected_direction}-{zone}"
+    if s["last_signal_sent"] == sig_key:
+        return
+
+    target = box_mid
+    stop_loss = box_high * 1.002 if expected_direction == "SELL" else box_low * 0.998
+    message = (
+        f"🔔 <b>إشارة {expected_direction} - {label} (Box Theory)</b>\n"
+        f"السعر الحالي: {price:.4f}\n"
+        f"أعلى الصندوق: {box_high:.4f} | أقل الصندوق: {box_low:.4f}\n"
+        f"وقف الخسارة المقترح: {stop_loss:.4f}\n"
+        f"الهدف (خط النص): {target:.4f}\n\n"
+        f"⚠️ ده إشعار فقط - راجع السوق بنفسك قبل الدخول"
+    )
+    send_telegram_message(message)
+    print(message)
+    s["last_signal_sent"] = sig_key
+    s["awaiting_confirm"] = None
 
 
 # ============ التشغيل ============
@@ -255,6 +381,7 @@ def check_ema_rsi_signal(asset_name):
 STRATEGY_FUNCS = {
     "sweep": check_sweep_signal,
     "ema_rsi": check_ema_rsi_signal,
+    "box_theory": check_box_theory_signal,
 }
 
 
@@ -263,8 +390,9 @@ if __name__ == "__main__":
         print("⚠️ لازم تحط TELEGRAM_TOKEN و TELEGRAM_CHAT_ID (في الكود أو environment variables)")
         raise SystemExit(1)
 
+    STRATEGY_NAMES = {"sweep": "PDH/PDL Sweep", "ema_rsi": "EMA+RSI", "box_theory": "Box Theory"}
     summary = "\n".join(
-        f"- {cfg['label']}: {'PDH/PDL Sweep' if cfg['strategy'] == 'sweep' else 'EMA+RSI'}"
+        f"- {cfg['label']}: {STRATEGY_NAMES[cfg['strategy']]}"
         for cfg in ASSETS.values()
     )
     send_telegram_message(f"✅ بوت الإشارات بدأ الشغل...\n{summary}")
