@@ -116,13 +116,25 @@ def send_telegram_message(text):
 
 
 def get_daily_levels(symbol):
+    """بترجع (أعلى سعر، أقل سعر، bias صعودي؟) لآخر يوم مكتمل قبل النهارده."""
     daily = yf.download(symbol, period="10d", interval="1d", progress=False)
-    if len(daily) < 2:
+    if daily is None or len(daily) < 2:
         return None, None, None
-    prev_day = daily.iloc[-2]
+
+    # تسطيح الأعمدة لو MultiIndex (ده اللي كان بيسبب خطأ float/Series)
+    if isinstance(daily.columns, pd.MultiIndex):
+        daily.columns = daily.columns.get_level_values(0)
+
+    # ناخد الأيام اللي قبل النهارده بس، وآخر يوم منهم هو "اليوم اللي فات"
+    today = datetime.now(timezone.utc).date()
+    daily = daily[daily.index.date < today]
+    if len(daily) < 1:
+        return None, None, None
+
+    prev_day = daily.iloc[-1]
     pdh = float(prev_day["High"])
     pdl = float(prev_day["Low"])
-    bias_bullish = bool(prev_day["Close"] > prev_day["Open"])
+    bias_bullish = bool(float(prev_day["Close"]) > float(prev_day["Open"]))
     return pdh, pdl, bias_bullish
 
 
@@ -133,7 +145,7 @@ def get_intraday_candles(symbol, interval, period="2d"):
     return df
 
 
-# ============ استراتيجية 1: PDH/PDL Sweep (الذهب، اليورو) ============
+# ============ استراتيجية 1: PDH/PDL Sweep (قديمة، غير مستخدمة حالياً) ============
 
 def reset_sweep_state(asset_name, today):
     cfg = ASSETS[asset_name]
