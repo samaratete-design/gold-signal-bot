@@ -4,33 +4,19 @@
 - الذهب (XAUUSD)، اليورو (EURUSD) → Box Theory (صندوق اليوم اللي فات)
 - البيتكوين (BTC)، الباوند (GBPUSD)، الين (USDJPY) → EMA 9/21 Crossover + RSI Filter
 
-استراتيجية Box Theory:
-- بناخد أعلى وأقل سعر لشمعة اليوم اللي فات (Daily) = "الصندوق"
-- خط النص = منتصف المسافة بين القمة والقاع
-- على فريم 15 دقيقة: لو السعر قريب من أعلى الصندوق (آخر 15% من الارتفاع) →
-  Sell فقط. لو قريب من أسفل الصندوق (أول 15%) → Buy فقط. لو في المنتصف →
-  لا تداول (منطقة غير واضحة)
-- الدخول مش فوري: البوت بيستنى شمعة تأكيد/انعكاس قبل ما يبعت الإشارة،
-  عشان يقلل الإشارات الكاذبة
-
-دالة استراتيجية الـ PDH/PDL Sweep القديمة لسه موجودة في الكود
-(check_sweep_signal) لو حبيت ترجعلها في أي وقت.
+التعديلات في النسخة دي:
+1. الإشارات بتتحسب على شمعات مقفولة بس (مش الشمعة اللي لسه بتتكوّن)
+2. كل إشارة بتتسجل في ملف signals_log.csv وكمان بتتطبع في اللوج بسطر
+   بيبدأ بـ SIGNAL_LOG (نسخة احتياطية لو الملف اتمسح)
 
 البوت ده بيبعت إشعار على تليجرام بس، ومش بينفذ أي صفقة فعلية.
 دايماً راجع الإشارة بنفسك قبل ما تدخل صفقة.
 
 المتطلبات:
     pip install yfinance pandas requests ta
-
-خطوات الإعداد:
-1. اعمل بوت تليجرام عن طريق @BotFather وخد التوكن
-2. ابعت أي رسالة لبوتك، وبعدين افتح الرابط ده وحط التوكن مكانه:
-   https://api.telegram.org/bot<TOKEN>/getUpdates
-   وهتلاقي "chat":{"id": ...} - ده الـ CHAT_ID بتاعك
-3. حط القيم في TELEGRAM_TOKEN و TELEGRAM_CHAT_ID (أو environment variables)
-4. شغّل البوت على سيرفر شغال 24/7 - زي Render
 """
 
+import csv
 import os
 import time
 from datetime import datetime, timezone
@@ -62,6 +48,9 @@ RSI_OVERBOUGHT = 70
 
 # إعدادات استراتيجية Box Theory (الذهب، اليورو)
 BOX_ZONE_PERCENT = 0.15  # أقرب 15% من كل طرف تعتبر "قريب"
+
+# ملف تسجيل الإشارات
+SIGNAL_LOG_FILE = "signals_log.csv"
 # =====================================
 
 
@@ -110,9 +99,37 @@ def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
-        requests.post(url, data=payload, timeout=10)
+        r = requests.post(url, data=payload, timeout=10)
+        if r.status_code != 200:
+            print(f"تليجرام رجّع خطأ {r.status_code}: {r.text[:200]}")
     except Exception as e:
         print(f"فشل إرسال الرسالة: {e}")
+
+
+def log_signal(asset_name, strategy, direction, price, stop_loss, target):
+    """بيسجل الإشارة في CSV وبيطبعها في اللوج. عمود result بتملّيه إنت بإيدك بعدين."""
+    row = [
+        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        asset_name,
+        strategy,
+        direction,
+        f"{price:.5f}",
+        f"{stop_loss:.5f}",
+        f"{target:.5f}",
+        "",
+    ]
+    print("SIGNAL_LOG," + ",".join(row))
+    try:
+        new_file = not os.path.exists(SIGNAL_LOG_FILE)
+        with open(SIGNAL_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if new_file:
+                writer.writerow(
+                    ["time_utc", "asset", "strategy", "direction", "price", "stop_loss", "target", "result"]
+                )
+            writer.writerow(row)
+    except Exception as e:
+        print(f"فشل تسجيل الإشارة في الملف: {e}")
 
 
 def get_daily_levels(symbol):
@@ -121,7 +138,7 @@ def get_daily_levels(symbol):
     if daily is None or len(daily) < 2:
         return None, None, None
 
-    # تسطيح الأعمدة لو MultiIndex (ده اللي كان بيسبب خطأ float/Series)
+    # تسطيح الأعمدة لو MultiIndex
     if isinstance(daily.columns, pd.MultiIndex):
         daily.columns = daily.columns.get_level_values(0)
 
@@ -250,7 +267,7 @@ def check_ema_rsi_signal(asset_name):
     s = state[asset_name]
 
     df = get_intraday_candles(symbol, interval, period="5d")
-    if len(df) < EMA_SLOW + 2:
+    if len(df) < EMA_SLOW + 3:
         print(f"[{label}] بيانات مش كفاية لسه.")
         return
 
@@ -258,8 +275,9 @@ def check_ema_rsi_signal(asset_name):
     df["ema_slow"] = ta.trend.ema_indicator(df["close"], window=EMA_SLOW)
     df["rsi"] = ta.momentum.rsi(df["close"], window=RSI_PERIOD)
 
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
+    # آخر شمعتين مقفولتين (iloc[-1] هي الشمعة الجارية فبنتجاهلها)
+    prev = df.iloc[-3]
+    curr = df.iloc[-2]
 
     crossed_up = prev["ema_fast"] <= prev["ema_slow"] and curr["ema_fast"] > curr["ema_slow"]
     crossed_down = prev["ema_fast"] >= prev["ema_slow"] and curr["ema_fast"] < curr["ema_slow"]
@@ -286,6 +304,7 @@ def check_ema_rsi_signal(asset_name):
         )
         send_telegram_message(message)
         print(message)
+        log_signal(asset_name, "EMA+RSI", signal, price, stop_loss, take_profit)
         s["last_signal"] = signal
     else:
         print(f"[{label} | {datetime.now()}] لا توجد إشارة جديدة. السعر: {price:.4f} | RSI: {rsi:.1f}")
@@ -334,11 +353,12 @@ def check_box_theory_signal(asset_name):
         return
 
     df = get_intraday_candles(symbol, interval)
-    if len(df) < 2:
+    if len(df) < 3:
         return
 
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
+    # آخر شمعتين مقفولتين (iloc[-1] هي الشمعة الجارية فبنتجاهلها)
+    prev = df.iloc[-3]
+    curr = df.iloc[-2]
     price = float(curr["close"])
     box_high, box_low, box_mid = s["box_high"], s["box_low"], s["box_mid"]
     zone = get_box_zone(price, box_high, box_low)
@@ -384,6 +404,7 @@ def check_box_theory_signal(asset_name):
     )
     send_telegram_message(message)
     print(message)
+    log_signal(asset_name, "Box Theory", expected_direction, price, stop_loss, target)
     s["last_signal_sent"] = sig_key
     s["awaiting_confirm"] = None
 
